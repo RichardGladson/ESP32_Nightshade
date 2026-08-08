@@ -74,7 +74,8 @@ lib_deps =
 
 build_flags =
 -Wl,--wrap=ieee80211_raw_frame_sanity_check
--D CORE_DEBUG_LEVEL=0
+-D CORE_DEBUG_LEVEL=0 
+```
 
 
 ### Key Technical Details
