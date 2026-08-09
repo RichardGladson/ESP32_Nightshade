@@ -353,17 +353,17 @@ const char index_html[] PROGMEM = R"rawliteral(
     <div id="selectedInfo">None selected</div>
   </div>
 
+  <!-- Clients -->
+  <div class="card">
+    <div style="font-weight:600; margin-bottom:8px">Connected Clients</div>
+    <div id="clientList" class="clients">No clients yet</div>
+  </div>
+
   <!-- Network List -->
   <div class="card">
     <div style="font-weight:600; margin-bottom:8px">Wi-Fi Networks</div>
     <div id="networkList">Loading...</div>
     <div id="lockError" class="error">This tool is locked to the target SSID only.</div>
-  </div>
-
-  <!-- Clients -->
-  <div class="card">
-    <div style="font-weight:600; margin-bottom:8px">Connected Clients</div>
-    <div id="clientList" class="clients">No clients yet</div>
   </div>
 
 <script>
