@@ -2,7 +2,11 @@
 
 A portable Wi-Fi testing tool built on the ESP32 with a 1.8" ST7735 TFT display, analog joystick, and full web control interface.
 
-**Important:** This tool is intentionally restricted so that attacks only work on the network named **F307**. It is designed for testing your own network only.
+**Important:** This tool is intentionally restricted so that attacks only work on the network named **F307**. It is designed for testing your own network only.  
+
+**Do not use this Project for any illegal purpose.**
+
+### **🚫Do not be a [_skid_](https://www.google.com/search?q=skid+meaning+in+programming+slang).**
 
 ---
 
@@ -151,3 +155,7 @@ build_flags =
 ---
 
 **ESP32 Nightshade** – A personal Wi-Fi testing companion.
+
+**Do not use this Project for any illegal purpose.**
+
+# **🚫Do not be a [_skid_](https://www.google.com/search?q=skid+meaning+in+programming+slang).**
