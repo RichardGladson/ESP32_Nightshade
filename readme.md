@@ -2,7 +2,14 @@
 
 A portable Wi-Fi testing tool built on the ESP32 with a 1.8" ST7735 TFT display, analog joystick, and full web control interface.
 
-**Before proceeding further, please read [`DISCLAIMER.md`](DISCLAIMER.md).**
+
+## **Before proceeding further, please read [`DISCLAIMER.md`](DISCLAIMER.md).**
+
+**Important:** This tool is intentionally restricted so that attacks only work on the network named **F307**. It is designed for testing your own network only.  
+
+**Do not use this Project for any illegal purpose.**
+
+### **🚫Do not be a [_skid_](https://www.google.com/search?q=skid+meaning+in+programming+slang).**
 
 ---
 
@@ -136,4 +143,17 @@ build_flags =
 
 ## Credits
 
-Inspired by projects such as ESP32 Marauder, Bruce Firmware, and nyanBOX.
+
+ ### Inspired by projects such as ESP32 Marauder, Bruce Firmware, and nyanBOX.
+
+- Inspired by projects such as ESP32 Marauder, Bruce Firmware, and nyanBOX
+- Built iteratively with focus on stability, usability, and safety restrictions
+
+---
+
+**ESP32 Nightshade** – A personal Wi-Fi testing companion.
+
+**Do not use this Project for any illegal purpose.**
+
+# **🚫Do not be a [_skid_](https://www.google.com/search?q=skid+meaning+in+programming+slang).**
+
